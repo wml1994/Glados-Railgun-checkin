@@ -112,6 +112,12 @@ class Config:
     """默认域名"""
     DOMAINS = ["glados.cloud", "railgun.info"]
 
+    """Cookie 类型 → 目标域名映射（按顺序匹配首个命中的规则，未命中则跑全部域名）"""
+    COOKIE_DOMAIN_RULES = [
+        ("gld:", ["glados.cloud"]),
+        ("koa:sess", ["railgun.info"]),
+    ]
+
     """兑换计划列表"""
     EXCHANGE_PLANS = {
         ExchangePlan.PLAN100.value: 100,
@@ -594,19 +600,27 @@ class Checker:
         if self.config.verbose or force:
             logger.info(f"{LogEmoji.COOKIE}[{cookie_idx}] {LogEmoji.DOMAIN}[{domain}] {emoji} {message}")
 
+    def _match_domains(self, cookie: str) -> List[str]:
+        """按 Cookie 类型匹配目标域名（未命中规则则跑全部域名，保持向后兼容）"""
+        for keyword, domains in self.config.COOKIE_DOMAIN_RULES:
+            if keyword in cookie:
+                return domains
+        return self.config.DOMAINS
+
     def checkin_all(self):
         """执行所有签到任务"""
         cookie_count = len(self.config.cookies_list)
-        domain_count = len(self.config.DOMAINS)
-        total_tasks = cookie_count * domain_count
+        matched = [(idx, cookie, self._match_domains(cookie)) for idx, cookie in enumerate(self.config.cookies_list, 1)]
+        total_tasks = sum(len(domains) for _, _, domains in matched)
         task_idx = 0
 
-        logger.info(f"{LogEmoji.INFO} 共 {cookie_count} 个 Cookie, {domain_count} 个域名, 共 {total_tasks} 个任务")
+        logger.info(f"{LogEmoji.INFO} 共 {cookie_count} 个 Cookie, {len(self.config.DOMAINS)} 个域名, 共 {total_tasks} 个任务")
 
-        for cookie_idx, cookie in enumerate(self.config.cookies_list, 1):
-            logger.info(f"{LogEmoji.START} ========== 开始处理 Cookie {cookie_idx} ==========")
+        for cookie_idx, cookie, domains in matched:
+            domain_names = "、".join(domains)
+            logger.info(f"{LogEmoji.START} ========== 开始处理 Cookie {cookie_idx}（目标域名: {domain_names}）==========")
 
-            for domain in self.config.DOMAINS:
+            for domain in domains:
                 task_idx += 1
                 logger.info(f"{LogEmoji.INFO} ----- 任务 {task_idx}/{total_tasks}: {LogEmoji.COOKIE}[{cookie_idx}] on {LogEmoji.DOMAIN}[{domain}] -----")
 
@@ -633,6 +647,7 @@ class Checker:
             checkin_result = api.checkin(cookie)
             result.status = checkin_result["status"]
             result.code = checkin_result.get("code", CheckinStatus.FAILURE)
+            result.points = str(checkin_result.get("points", "0"))
 
             self._log(cookie_idx, domain, LogEmoji.POINTS, "查询总积分")
             points_str, points_num = api.get_points(cookie)
