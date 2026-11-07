@@ -35,6 +35,7 @@ class APIEndpoint(Enum):
     STATUS = "/api/user/status"
     POINTS = "/api/user/points"
     EXCHANGE = "/api/user/exchange"
+    ANALYTICS = "/api/analytics/collect"
 
 
 class LogEmoji:
@@ -110,13 +111,16 @@ class Config:
     DEFAULT_VERBOSE = False
 
     """默认域名"""
-    DOMAINS = ["glados.cloud", "railgun.info"]
+    DOMAINS = ["glados.cloud", "railgun.info", "glados.space"]
 
     """Cookie 类型 → 目标域名映射（按顺序匹配首个命中的规则，未命中则跑全部域名）"""
     COOKIE_DOMAIN_RULES = [
-        ("gld:", ["glados.cloud"]),
+        ("gld:", ["glados.cloud", "glados.space"]),
         ("koa:sess", ["railgun.info"]),
     ]
+
+    """签到前需要先发送统计上报的域名"""
+    ANALYTICS_DOMAINS = ["glados.space"]
 
     """兑换计划列表"""
     EXCHANGE_PLANS = {
@@ -197,6 +201,15 @@ PLATFORM_UA = {
     "Android": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
 }
 
+# glados.space 签到前的统计上报请求体（模拟浏览器访问控制台页面）
+ANALYTICS_BODY = {
+    "site": "console",
+    "path": "/console/network",
+    "ref": "",
+    "vid": "c7amygr3myrmw06uw8x",
+    "sid": "txyrltb9h1nmw4h864c",
+}
+
 
 class API:
     """API 调用"""
@@ -205,6 +218,7 @@ class API:
     STATUS_URL = APIEndpoint.STATUS.value
     POINTS_URL = APIEndpoint.POINTS.value
     EXCHANGE_URL = APIEndpoint.EXCHANGE.value
+    ANALYTICS_URL = APIEndpoint.ANALYTICS.value
 
     def __init__(self, domain: str, cookie_index: int = 0, verbose: bool = False):
         self.domain: str = domain
@@ -272,7 +286,7 @@ class API:
         """获取完整 URL"""
         return f"https://{self.domain}{path}"
 
-    def _make_request(self, url: str, method: str, data: Optional[Dict] = None, cookies: str = "", user_agent: Optional[str] = None) -> Optional[requests.Response]:
+    def _make_request(self, url: str, method: str, data: Optional[Dict] = None, cookies: str = "", user_agent: Optional[str] = None, json_payload: Optional[Dict] = None) -> Optional[requests.Response]:
         """发送 HTTP 请求"""
         session_headers = self.headers.copy()
         if user_agent:
@@ -281,7 +295,7 @@ class API:
 
         try:
             if method.upper() == "POST":
-                response = self.session.post(url, headers=session_headers, data=data, timeout=(60, 120))
+                response = self.session.post(url, headers=session_headers, data=data, json=json_payload, timeout=(60, 120))
             elif method.upper() == "GET":
                 response = self.session.get(url, headers=session_headers, timeout=(60, 120))
             else:
@@ -299,6 +313,17 @@ class API:
     def _get_checkin_data(self) -> Dict[str, str]:
         """获取签到数据"""
         return {"token": self.domain}
+
+    def analytics_collect(self, cookies: str) -> bool:
+        """签到前向统计接口上报访问事件（glados.space 要求），失败仅告警不阻断签到"""
+        url = self._get_full_url(self.ANALYTICS_URL)
+        response = self._make_request(url, "POST", cookies=cookies, json_payload=ANALYTICS_BODY)
+
+        if response:
+            self._log("info", LogEmoji.SUCCESS, f"统计上报完成: HTTP {response.status_code}")
+            return True
+        self._log("warning", LogEmoji.WARNING, "统计上报失败(不阻断签到)", force=True)
+        return False
 
     @log_method
     def checkin(self, cookies: str) -> Dict[str, Union[str, CheckinStatus]]:
@@ -639,6 +664,10 @@ class Checker:
         result = CheckinResult(cookie_idx, domain)
 
         with API(domain, cookie_idx, verbose=self.config.verbose) as api:
+            if domain in self.config.ANALYTICS_DOMAINS:
+                self._log(cookie_idx, domain, LogEmoji.INFO, "发送统计上报")
+                api.analytics_collect(cookie)
+
             self._log(cookie_idx, domain, LogEmoji.STATUS, "查询剩余天数")
             days_str, status_code = api.get_status(cookie)
             result.days = days_str
